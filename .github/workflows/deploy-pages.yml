@@ -23,7 +23,7 @@ jobs:
       GIT_CONFIG_VALUE_0: main
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deploy.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout site
@@ -36,14 +36,69 @@ jobs:
         run: |
           mkdir -p /tmp/levelflow-pages
           rsync -a --delete --exclude='.git' --exclude='.github' ./ /tmp/levelflow-pages/
+          test -s /tmp/levelflow-pages/index.html
+          tar --dereference --hard-dereference --directory /tmp/levelflow-pages -cvf "$RUNNER_TEMP/github-pages.tar" .
+          test -s "$RUNNER_TEMP/github-pages.tar"
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v5
+        id: upload
+        uses: actions/upload-artifact@v7
         with:
-          path: /tmp/levelflow-pages
+          name: github-pages
+          path: ${{ runner.temp }}/github-pages.tar
+          retention-days: 1
+          if-no-files-found: ignore
 
       - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v5
+        id: deploy
+        run: |
+          set -euo pipefail
+
+          token_response="$(curl -fsSL \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}")"
+          oidc_token="$(jq -r '.value' <<< "$token_response")"
+          test -n "$oidc_token"
+          test "$oidc_token" != "null"
+
+          deployment_payload="$(jq -n \
+            --argjson artifact_id "${ARTIFACT_ID}" \
+            --arg pages_build_version "${GITHUB_SHA}" \
+            --arg oidc_token "${oidc_token}" \
+            '{artifact_id: $artifact_id, pages_build_version: $pages_build_version, oidc_token: $oidc_token}')"
+          deployment_response="$(gh api \
+            -X POST \
+            "repos/${GITHUB_REPOSITORY}/pages/deployments" \
+            --input - <<< "$deployment_payload")"
+
+          deployment_id="$(jq -r '.id // (.status_url | split("/") | last)' <<< "$deployment_response")"
+          page_url="$(jq -r '.page_url // empty' <<< "$deployment_response")"
+          test -n "$deployment_id"
+          echo "page_url=${page_url}" >> "$GITHUB_OUTPUT"
+          echo "Created Pages deployment ${deployment_id}."
+
+          deadline=$((SECONDS + 600))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            status_response="$(gh api "repos/${GITHUB_REPOSITORY}/pages/deployments/${deployment_id}")"
+            status="$(jq -r '.status' <<< "$status_response")"
+            case "$status" in
+              succeed)
+                echo "Pages deployment completed."
+                exit 0
+                ;;
+              deployment_failed|deployment_content_failed|deployment_cancelled|deployment_lost)
+                echo "Pages deployment ended with status: ${status}"
+                exit 1
+                ;;
+              *)
+                echo "Pages deployment status: ${status}"
+                sleep 5
+                ;;
+            esac
+          done
+
+          echo "Pages deployment timed out."
+          exit 1
         env:
-          NODE_OPTIONS: --no-deprecation
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          GH_TOKEN: ${{ github.token }}
