@@ -17,6 +17,10 @@ concurrency:
 
 jobs:
   deploy:
+    env:
+      GIT_CONFIG_COUNT: 1
+      GIT_CONFIG_KEY_0: init.defaultBranch
+      GIT_CONFIG_VALUE_0: main
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -41,3 +45,5 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
+        env:
+          NODE_OPTIONS: --no-deprecation
